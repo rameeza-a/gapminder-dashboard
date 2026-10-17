@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 # Page settings — must be the first Streamlit command
@@ -17,16 +18,27 @@ CONTINENT_COLORS = {
 HIGHLIGHT = "#2a78d6"  # blue for the thing we want you to notice
 MUTED = "#a3a29b"  # gray for everything else
 
+# Shared by the scatter plot and the map, so both charts read the same way:
+# shape = income group, shade of blue = life expectancy
+GDP_GROUPS = ["Low", "Middle", "High"]
+GDP_SYMBOLS = {"Low": "triangle-down", "Middle": "circle", "High": "triangle-up"}
+LIFE_SCALE = ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]  # light → dark
+
 
 # @st.cache_data loads the data once and reuses it,
 # instead of reloading every time you click something
 @st.cache_data
 def load_data():
-    df = px.data.gapminder()
-    return df.drop(columns=["iso_num"])
+    df = px.data.gapminder().drop(columns=["iso_num"])
+    # pd.cut sorts each country into a group based on which range its GDP falls in
+    df["gdp_group"] = pd.cut(
+        df["gdpPercap"], bins=[0, 3000, 15000, np.inf], labels=GDP_GROUPS, right=False
+    ).astype(str)
+    return df
 
 
 df = load_data()
+LIFE_RANGE = (df["lifeExp"].min(), df["lifeExp"].max())  # same color scale in every year
 
 st.title("🌍 Gapminder Dashboard")
 st.caption("Life expectancy, population and GDP per person for 142 countries, 1952–2007")
@@ -89,7 +101,15 @@ in_both = set(top_gdp["country"]) & set(top_life["country"])
 st.subheader(f"Richest vs. longest-living countries, {year}")
 st.caption(f"Blue = in both top 10 lists ({len(in_both)} of {len(top_gdp)} countries). Hover a bar to see the other measure.")
 
-LABELS = {"gdpPercap": "GDP per person (US$)", "lifeExp": "Life expectancy (years)", "country": "", "group": ""}
+LABELS = {
+    "gdpPercap": "GDP per person (US$)",
+    "lifeExp": "Life expectancy (years)",
+    "gdp_group": "Income group",
+    "country": "",
+    "group": "",
+}
+# Income group legend sits above the chart, in the same spot on the scatter and the map
+SHAPE_LEGEND = dict(title="Income group", orientation="h", x=0, y=1.02, yanchor="bottom")
 
 
 # We draw the same kind of chart twice, so we put it in a function
@@ -129,8 +149,8 @@ with left:
     if len(now) >= 10:
         r = np.log10(now["gdpPercap"]).corr(now["lifeExp"])
         st.caption(
-            f"Each dot is a country. Correlation r = {r:.2f} (1 = perfect link, 0 = no link). "
-            "The GDP axis is logarithmic: each step is 10× richer."
+            f"Each marker is a country, styled like the map below. Correlation r = {r:.2f} "
+            "(1 = perfect link, 0 = no link). The GDP axis is logarithmic: each step is 10× richer."
         )
     else:
         st.caption(f"Only {len(now)} countries selected — too few to measure a correlation.")
@@ -139,11 +159,30 @@ with left:
         x="gdpPercap",
         y="lifeExp",
         log_x=True,
+        symbol="gdp_group",
+        symbol_map=GDP_SYMBOLS,
+        category_orders={"gdp_group": GDP_GROUPS},
+        color="lifeExp",
+        color_continuous_scale=LIFE_SCALE,
+        range_color=LIFE_RANGE,
         hover_name="country",
         hover_data={"continent": True, "gdpPercap": ":,.0f", "lifeExp": ":.1f"},
         labels=LABELS,
     )
-    fig.update_traces(marker=dict(size=9, color=HIGHLIGHT, opacity=0.7))
+    fig.update_traces(marker=dict(size=10, line=dict(width=1, color="#0b0b0b")))
+    # Thin gray lines where one income group ends and the next begins
+    for cutoff in (3000, 15000):
+        fig.add_vline(x=cutoff, line_width=1, line_color=MUTED)
+    # Swap in legend-only entries with white shapes, so the legend looks exactly like the map's
+    fig.update_traces(showlegend=False)
+    for group in GDP_GROUPS:
+        if group in now["gdp_group"].values:
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode="markers", name=group,
+                legendgroup=group,  # clicking it still hides/shows that group's markers
+                marker=dict(symbol=GDP_SYMBOLS[group], size=10, color="white", line=dict(width=1, color="#0b0b0b")),
+            ))
+    fig.update_layout(coloraxis_showscale=False, legend=SHAPE_LEGEND)  # the y-axis already shows life expectancy
     st.plotly_chart(fig)
 
 with right:
@@ -167,33 +206,51 @@ st.divider()
 # ---------- World map ----------
 st.subheader(f"World map, {year}")
 st.caption(
-    "Shape and shade = income group (GDP per person: Low under \\$3k · Middle \\$3k–15k · High \\$15k+). "
-    "Bigger marker = longer life expectancy."
+    "Country shade = life expectancy (darker = longer). "
+    "Marker shape = income group by GDP per person: ▼ Low under \\$3k · ● Middle \\$3k–15k · ▲ High \\$15k+"
 )
 
-# pd.cut sorts each country into a group based on which range its GDP falls in
-GDP_GROUPS = ["Low", "Middle", "High"]
-map_data = now.copy()
-map_data["gdp_group"] = pd.cut(
-    map_data["gdpPercap"], bins=[0, 3000, 15000, np.inf], labels=GDP_GROUPS, right=False
-).astype(str)
-
-fig = px.scatter_geo(
-    map_data,
+# Layer 1: fill each country with a shade of blue for its life expectancy
+fig = px.choropleth(
+    now,
     locations="iso_alpha",  # 3-letter country codes tell Plotly where each country is
+    color="lifeExp",
+    color_continuous_scale=LIFE_SCALE,
+    range_color=LIFE_RANGE,
+    hover_name="country",
+    hover_data={"lifeExp": ":.1f", "gdpPercap": ":,.0f", "iso_alpha": False},
+    labels=LABELS,
+    projection="natural earth",
+)
+fig.update_traces(marker_line_color="white", marker_line_width=0.5)  # thin borders between countries
+
+# Layer 2: one white marker per country, its shape showing the income group
+markers = px.scatter_geo(
+    now,
+    locations="iso_alpha",
     symbol="gdp_group",
-    color="gdp_group",
-    size="lifeExp",
-    symbol_map={"Low": "triangle-down", "Middle": "circle", "High": "triangle-up"},
-    color_discrete_map={"Low": "#86b6ef", "Middle": "#2a78d6", "High": "#104281"},
+    symbol_map=GDP_SYMBOLS,
     category_orders={"gdp_group": GDP_GROUPS},
     hover_name="country",
-    hover_data={"gdpPercap": ":,.0f", "lifeExp": ":.1f", "iso_alpha": False},
-    labels={**LABELS, "gdp_group": "Income group"},
-    projection="natural earth",
-    size_max=14,
+    hover_data={"gdp_group": True, "gdpPercap": ":,.0f", "iso_alpha": False},
+    labels=LABELS,
 )
-fig.update_layout(height=550, margin=dict(l=0, r=0, t=0, b=0))
+markers.update_traces(marker=dict(size=8, color="white", line=dict(width=1, color="#0b0b0b")))
+fig.add_traces(markers.data)
+
+fig.update_geos(
+    fitbounds="locations",  # zoom in on the selected continents
+    showframe=False,
+    showcoastlines=False,
+    landcolor="rgba(137, 135, 129, 0.2)",  # faint gray for countries not selected
+    bgcolor="rgba(0, 0, 0, 0)",
+)
+fig.update_layout(
+    height=600,
+    margin=dict(l=0, r=0, t=40, b=0),
+    legend=SHAPE_LEGEND,
+    coloraxis_colorbar=dict(title="Life<br>expectancy", thickness=12, len=0.6),
+)
 st.plotly_chart(fig)
 
 # ---------- Raw data ----------
